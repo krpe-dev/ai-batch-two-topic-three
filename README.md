@@ -21,7 +21,7 @@ py -m venv venv
 ### Audio File Input
 	py audio_file_input.py
 ### Real time speech detection
-	uvicorn audio_speech_detected:app --reload
+	uvicorn audio_speech_detection:app --reload
 	
 The implementation uses **Silero VAD**, a lightweight speech model, to detect speech and silence boundaries for end-of-speech detection. 
 **WhisperModel** is then used as an ASR speech model to transcribe the finalized speech segment.
