@@ -18,7 +18,7 @@ py -m venv venv
 
 Startup command
 	- Audio files
-	    -  py audio_file_input.py
+		- py audio_file_input.py
 	
 	- Real time audio speech
 		- uvicorn audio_speech_detected:app --reload
