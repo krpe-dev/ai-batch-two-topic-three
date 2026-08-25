@@ -16,12 +16,9 @@ Make sure you have the following installed:
 
 py -m venv venv
 
-Startup command
-	- Audio files
-		- py audio_file_input.py
-	
-	- Real time audio speech
-		- uvicorn audio_speech_detected:app --reload
+## Startup command
+	py audio_file_input.py
+	uvicorn audio_speech_detected:app --reload
 	
 The implementation uses **Silero VAD**, a lightweight speech model, to detect speech and silence boundaries for end-of-speech detection. 
 **WhisperModel** is then used as an ASR speech model to transcribe the finalized speech segment.
