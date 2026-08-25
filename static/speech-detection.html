@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Voice Interview</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f6f8;
+            margin: 0;
+            padding: 30px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+        }
+
+        button {
+            padding: 12px 18px;
+            margin: 5px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 15px;
+        }
+
+        #startBtn {
+            background: #2563eb;
+            color: white;
+        }
+
+        #stopBtn {
+            background: #dc2626;
+            color: white;
+        }
+
+        #resetBtn {
+            background: #6b7280;
+            color: white;
+        }
+
+        .status {
+            padding: 12px;
+            margin-top: 15px;
+            background: #eef2ff;
+            border-radius: 8px;
+            color: #1e3a8a;
+            font-weight: bold;
+        }
+
+        .box {
+            margin-top: 18px;
+            padding: 15px;
+            background: #f9fafb;
+            border-left: 4px solid #2563eb;
+            border-radius: 8px;
+        }
+
+        .question {
+            border-left-color: #16a34a;
+        }
+
+        .answer {
+            border-left-color: #f97316;
+        }
+
+        .log {
+            height: 280px;
+            overflow-y: auto;
+            background: #111827;
+            color: #d1d5db;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: Consolas, monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+        }
+
+        .small {
+            color: #6b7280;
+            font-size: 13px;
+        }
+    </style>
+</head>
+
+<body>
+<div class="container">
+    <h1>AI Voice Interview</h1>
+
+    <p class="small">
+        Click <b>Start Interview</b>, allow microphone access, listen to the question, then answer by voice.
+    </p>
+
+    <button id="startBtn">Start Interview</button>
+    <button id="stopBtn">Stop</button>
+    <button id="resetBtn">Reset</button>
+
+    <div id="status" class="status">Status: Not started</div>
+
+    <div class="box question">
+        <h3>Current AI Question</h3>
+        <div id="questionText">No question yet.</div>
+    </div>
+
+    <div class="box answer">
+        <h3>Transcript</h3>
+        <div id="transcriptText">No answer yet.</div>
+    </div>
+
+    <div class="box">
+        <h3>Answers</h3>
+        <div id="answersBox">No answers yet.</div>
+    </div>
+
+    <div class="box">
+        <h3>Debug Log</h3>
+        <div id="logBox" class="log"></div>
+    </div>
+</div>
+
+<script>
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let sourceNode = null;
+    let processorNode = null;
+    let zeroGain = null;
+
+    let isRecording = false;
+    let aiSpeaking = false;
+    let ignoreMicUntil = 0;
+
+    const TARGET_SAMPLE_RATE = 16000;
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const resetBtn = document.getElementById("resetBtn");
+
+    const statusBox = document.getElementById("status");
+    const questionText = document.getElementById("questionText");
+    const transcriptText = document.getElementById("transcriptText");
+    const answersBox = document.getElementById("answersBox");
+    const logBox = document.getElementById("logBox");
+
+    function log(message, data = null) {
+        const time = new Date().toLocaleTimeString();
+
+        if (data !== null) {
+            logBox.textContent += `[${time}] ${message} ${JSON.stringify(data)}\n`;
+        } else {
+            logBox.textContent += `[${time}] ${message}\n`;
+        }
+
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function setStatus(text) {
+        statusBox.textContent = "Status: " + text;
+        log(text);
+    }
+
+    function sendState(state) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: "state",
+                state: state
+            }));
+
+            log("Sent state:", state);
+        }
+    }
+
+    function speakText(text) {
+        return new Promise((resolve) => {
+            window.speechSynthesis.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = "en-US";
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+
+            utterance.onstart = () => {
+                aiSpeaking = true;
+                setStatus("AI speaking");
+                sendState("AI_SPEAKING");
+            };
+
+            utterance.onend = () => {
+                aiSpeaking = false;
+                ignoreMicUntil = Date.now() + 900;
+
+                setStatus("Listening");
+                sendState("IDLE");
+                resolve();
+            };
+
+            utterance.onerror = () => {
+                aiSpeaking = false;
+                ignoreMicUntil = Date.now() + 900;
+
+                setStatus("Listening");
+                sendState("IDLE");
+                resolve();
+            };
+
+            window.speechSynthesis.speak(utterance);
+        });
+    }
+
+    function stopSpeaking() {
+        window.speechSynthesis.cancel();
+        aiSpeaking = false;
+        ignoreMicUntil = Date.now() + 900;
+        sendState("IDLE");
+    }
+
+    function floatTo16BitPCM(float32Array) {
+        const int16Array = new Int16Array(float32Array.length);
+
+        for (let i = 0; i < float32Array.length; i++) {
+            let sample = Math.max(-1, Math.min(1, float32Array[i]));
+            int16Array[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        }
+
+        return int16Array;
+    }
+
+    function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+        if (outputSampleRate === inputSampleRate) {
+            return buffer;
+        }
+
+        const sampleRateRatio = inputSampleRate / outputSampleRate;
+        const newLength = Math.round(buffer.length / sampleRateRatio);
+        const result = new Float32Array(newLength);
+
+        let offsetResult = 0;
+        let offsetBuffer = 0;
+
+        while (offsetResult < result.length) {
+            const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+
+            let accumulator = 0;
+            let count = 0;
+
+            for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                accumulator += buffer[i];
+                count++;
+            }
+
+            result[offsetResult] = accumulator / count;
+            offsetResult++;
+            offsetBuffer = nextOffsetBuffer;
+        }
+
+        return result;
+    }
+
+    async function startInterview() {
+        if (isRecording) {
+            return;
+        }
+
+        setStatus("Starting");
+
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(`${protocol}://${window.location.host}/ws/audio`);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = async () => {
+            log("WebSocket opened");
+
+            await startMicrophone();
+
+            isRecording = true;
+            setStatus("Connected. Waiting for AI question.");
+        };
+
+        ws.onmessage = async (event) => {
+            const data = JSON.parse(event.data);
+            log("Server:", data);
+
+            if (data.event === "ai_response") {
+                questionText.innerHTML = `
+                    <b>Question ${data.question_number} of ${data.total_questions}</b><br>
+                    ${data.text}
+                `;
+
+                transcriptText.textContent = "Listen to the question.";
+                await speakText(data.text);
+            }
+
+            else if (data.event === "speech_started") {
+                setStatus("User speaking");
+            }
+
+            // else if (data.event === "partial_transcript") {
+            //     transcriptText.textContent = data.text;
+            // }
+
+            else if (data.status === "success") {
+                transcriptText.textContent = data.transcript || "Answer completed.";
+                setStatus("Answer completed. Waiting for next question.");
+
+                // Do not close WebSocket here.
+            }
+
+            else if (data.event === "answer_saved") {
+                addAnswer(data);
+            }
+
+            else if (data.event === "retry_question") {
+                transcriptText.textContent = data.message || "Please try again.";
+                setStatus("Retrying question");
+            }
+
+            else if (data.event === "interview_complete") {
+                setStatus("Interview complete");
+
+                questionText.textContent = "All questions completed.";
+                transcriptText.textContent = "Interview finished.";
+
+                log("Final answers:", data.answers);
+
+                // Optional:
+                // ws.close();
+            }
+
+            else if (data.event === "reset_done") {
+                answersBox.textContent = "No answers yet.";
+                questionText.textContent = "Reset complete. Waiting for question.";
+                transcriptText.textContent = "No answer yet.";
+                setStatus("Reset complete");
+            }
+
+            else if (data.event === "server_error") {
+                setStatus("Server error");
+                console.error(data.message);
+            }
+
+            else if (data.event === "asr_waiting") {
+                log("ASR waiting");
+            }
+        };
+
+        ws.onclose = (event) => {
+            log(`WebSocket closed. code=${event.code}, reason=${event.reason}, clean=${event.wasClean}`);
+            setStatus("WebSocket closed");
+            isRecording = false;
+        };
+
+        ws.onerror = (error) => {
+            log("WebSocket error");
+            console.error(error);
+        };
+    }
+
+    async function startMicrophone() {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }
+        });
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+        sourceNode = audioContext.createMediaStreamSource(mediaStream);
+
+        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processorNode.onaudioprocess = (event) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            // Do not stream mic while AI speaks or immediately after TTS.
+            if (aiSpeaking || Date.now() < ignoreMicUntil) {
+                return;
+            }
+
+            const inputBuffer = event.inputBuffer.getChannelData(0);
+
+            const downsampled = downsampleBuffer(
+                inputBuffer,
+                audioContext.sampleRate,
+                TARGET_SAMPLE_RATE
+            );
+
+            const pcm16 = floatTo16BitPCM(downsampled);
+
+            ws.send(pcm16.buffer);
+        };
+
+        sourceNode.connect(processorNode);
+
+        // Keep ScriptProcessor alive without playing microphone audio.
+        zeroGain = audioContext.createGain();
+        zeroGain.gain.value = 0;
+
+        processorNode.connect(zeroGain);
+        zeroGain.connect(audioContext.destination);
+
+        log("Microphone started. Browser sample rate:", audioContext.sampleRate);
+    }
+
+    function addAnswer(data) {
+        if (answersBox.textContent === "No answers yet.") {
+            answersBox.textContent = "";
+        }
+
+        const div = document.createElement("div");
+        div.style.padding = "10px";
+        div.style.marginBottom = "10px";
+        div.style.background = "#ffffff";
+        div.style.border = "1px solid #e5e7eb";
+        div.style.borderRadius = "8px";
+
+        div.innerHTML = `
+            <b>Question ${data.question_number}</b><br>
+            <b>Q:</b> ${data.question}<br>
+        `;
+
+        answersBox.appendChild(div);
+    }
+
+    function stopInterview() {
+        setStatus("Stopping");
+
+        stopSpeaking();
+
+        if (processorNode) {
+            processorNode.disconnect();
+            processorNode = null;
+        }
+
+        if (sourceNode) {
+            sourceNode.disconnect();
+            sourceNode = null;
+        }
+
+        if (zeroGain) {
+            zeroGain.disconnect();
+            zeroGain = null;
+        }
+
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            mediaStream = null;
+        }
+
+        if (audioContext) {
+            audioContext.close();
+            audioContext = null;
+        }
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.close();
+        }
+
+        isRecording = false;
+        setStatus("Stopped");
+    }
+
+    function resetInterview() {
+        stopSpeaking();
+
+        answersBox.textContent = "No answers yet.";
+        questionText.textContent = "No question yet.";
+        transcriptText.textContent = "No answer yet.";
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: "reset"
+            }));
+
+            log("Reset sent");
+        } else {
+            setStatus("Cannot reset. WebSocket is not open.");
+        }
+    }
+
+    startBtn.addEventListener("click", startInterview);
+    stopBtn.addEventListener("click", stopInterview);
+    resetBtn.addEventListener("click", resetInterview);
+</script>
+</body>
+</html>

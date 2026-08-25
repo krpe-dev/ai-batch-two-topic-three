@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Local AI End-of-Speech Demo</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 30px;
+    }
+
+    button {
+      padding: 10px 16px;
+      font-size: 16px;
+      margin-right: 10px;
+      margin-bottom: 10px;
+    }
+
+    pre {
+      background: #111;
+      color: #00ff66;
+      padding: 16px;
+      min-height: 300px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Local AI End-of-Speech Detection</h1>
+
+  <button onclick="startStreaming()">Start Mic</button>
+  <button onclick="stopStreaming()">Stop Mic</button>
+  <button onclick="playDummyTTS()">Play AI Voice</button>
+  <button onclick="stopTTS()">Stop TTS</button>
+
+  <h3>Logs</h3>
+  <pre id="log"></pre>
+
+  <script>
+    let ws;
+    let audioContext;
+    let micStream;
+    let processor;
+    let source;
+
+    let aiSpeaking = false;
+    let speechUtterance = null;
+
+    const logBox = document.getElementById("log");
+
+    function log(message) {
+      const text = typeof message === "string"
+        ? message
+        : JSON.stringify(message, null, 2);
+
+      logBox.textContent += text + "\n\n";
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    async function startStreaming() {
+      ws = new WebSocket("ws://localhost:8000/ws/audio");
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        log("WebSocket connected");
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        log(data);
+
+        if (data.type === "speech_onset") {
+          if (aiSpeaking) {
+            log("User interrupted AI. Stopping TTS...");
+            stopTTS();
+          }
+        }
+
+        if (data.type === "end_of_speech") {
+          log("Detected final end-of-speech.");
+          log("Transcript: " + data.transcript);
+        }
+      };
+
+      ws.onerror = () => {
+        log("WebSocket error");
+      };
+
+      ws.onclose = () => {
+        log("WebSocket closed");
+      };
+
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1
+        }
+      });
+
+      audioContext = new AudioContext();
+
+      await audioContext.audioWorklet.addModule("/static/pcm-worklet.js");
+
+      source = audioContext.createMediaStreamSource(micStream);
+      processor = new AudioWorkletNode(audioContext, "pcm-worklet");
+
+      processor.port.onmessage = (event) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(event.data);
+        }
+      };
+
+      source.connect(processor);
+
+      log("Microphone streaming started");
+    }
+
+    function stopStreaming() {
+      if (processor) processor.disconnect();
+      if (source) source.disconnect();
+
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+      }
+
+      if (audioContext) {
+        audioContext.close();
+      }
+
+      if (ws) {
+        ws.close();
+      }
+
+      log("Microphone streaming stopped");
+    }
+
+    function playDummyTTS() {
+      stopTTS();
+
+      aiSpeaking = true;
+
+      speechUtterance = new SpeechSynthesisUtterance(
+        "So can you explain polymorphism in object oriented programming? I am still speaking, but you can interrupt me."
+      );
+
+      speechUtterance.onend = () => {
+        aiSpeaking = false;
+        log("AI voice finished");
+      };
+
+      window.speechSynthesis.speak(speechUtterance);
+
+      log("AI voice started");
+    }
+
+    function stopTTS() {
+      window.speechSynthesis.cancel();
+      aiSpeaking = false;
+      log("AI voice stopped");
+    }
+  </script>
+</body>
+</html>
